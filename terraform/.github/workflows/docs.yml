@@ -1,0 +1,45 @@
+---
+name: Documentation
+
+on:
+  pull_request:
+    branches:
+      - main
+
+env:
+  INPUT_WORKING_DIR: "./terraform"
+  INPUT_ATLANTIS_FILE: "disabled"
+  INPUT_FIND_DIR: "disabled"
+  INPUT_RECURSIVE: "true"
+  INPUT_RECURSIVE_PATH: "."
+  INPUT_OUTPUT_FORMAT: "markdown table"
+  INPUT_OUTPUT_METHOD: "inject"
+  INPUT_OUTPUT_FILE: "README.md"
+  INPUT_TEMPLATE: |-
+    <!-- BEGIN_TF_DOCS -->
+    {{ .Content }}
+    <!-- END_TF_DOCS -->
+  INPUT_ARGS: ""
+  INPUT_INDENTION: "2"
+  INPUT_GIT_PUSH: "true"
+  INPUT_GIT_COMMIT_MESSAGE: "docs: terraform-docs update"
+  INPUT_CONFIG_FILE: "disabled"
+  INPUT_FAIL_ON_DIFF: "false"
+  INPUT_GIT_PUSH_SIGN_OFF: "false"
+  INPUT_GIT_PUSH_USER_NAME: ""
+  INPUT_GIT_PUSH_USER_EMAIL: ""
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    container: docker://quay.io/terraform-docs/gh-actions:1.0.0
+    steps:
+
+      - name: Checkout out
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Terraform-Docs
+        run: /docker-entrypoint.sh
