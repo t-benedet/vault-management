@@ -1,0 +1,327 @@
+---
+name: "Terraform"
+
+on:
+  #pull_request:
+  #  branches:
+  #  - main
+  workflow_dispatch:
+
+# Define environment variables
+env:
+# Terraform env variable
+  tf_version: "1.3.9"                                     # Define Terraform version
+  tf_vars_file: "terraform.tfvars"                        # Define vars file to use
+  tf_root: "terraform"                                    # Define terraform root directory
+  tf_plan: "plan.tfplan"                                  # Define terraform plan name
+  tf_plan_json: plan.tfplan.json                          # Define terraform plan json format name
+# OPA (compliance check) env variables
+  opa_enabled: false                                      # Define Opa Enabled (true/false)
+  opa_rego_path: OPA/rules                                # Define Rego path
+  opa_rego_file: repo.rego                                # Define Rego name
+  opa_version: v0.49.0                                    # Define Opa version
+  opa_result_file: result.json                            # Define Opa result file
+  opa_result_path: OPA                                    # Define Opa result Path
+# CHECKOV (security check) env variable
+  checkov_enabled: true                                   # Define Checkov Enabled (true/false)
+  checkov_skip_check: "CKV2_GIT_1"                        # Define Checkov check not should be performed separeted with comma
+  checkov_soft_fail: false                                # Define Checkov soft fail (true/false)
+  checkov_download_external_modules: true                 # Define Checkov external module (true/false)
+# GITHUB TERRAFORM PROVIDER env variable
+  TF_VAR_GITHUB_OWNER: "XXX"               # Define organization where repo will be created
+# VAULT
+  VAULT_URL: XXX                    # Define Vault url
+  VAULT_NAMESPACE: XXX                     # Define Vault namespace
+  VAULT_ROLE: XXX                      # Define Vault role
+  GITHUB_TOKEN: ${{ github.token }}
+# Define permission
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  actions: read
+  security-events: write
+
+# Define jobs workflow
+jobs:
+# Terraform plan ( create terraform plan to be checked in next step)
+  terraform-plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ env.tf_root }}
+    # Define steps in Terraform plan
+    steps:
+      # Checkout code on runner
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      # setup nodejs (needed by terraform)
+      - name: Setup Node.JS for Terraform wrapper
+        uses: actions/setup-node@v3
+        with:
+          node-version: 'lts/*'
+
+      # setup terraform
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.tf_version }}
+          terraform_wrapper: false
+
+      # Check terraform format
+      - name: Terraform Format
+        id: fmt
+        run: terraform fmt -check -recursive
+
+      # Launch terraform init
+      - name: Terraform Init
+        id: init
+        run: terraform init -input=false -no-color
+
+      # Launch terraform validate
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Set JWT Auth Token
+        id: auth-token
+        run: |
+            TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL")
+            export TOKEN
+            echo "token=$TOKEN" >> $GITHUB_OUTPUT
+      # Launch terraform plan (json format)
+      - name: Terraform Plan
+        id: plan
+        run: |
+          TF_VAR_auth_jwt=$(echo "$GITHUB_OIDC_TOKEN" | jq -r .value)
+          export TF_VAR_auth_jwt
+          TF_LOG=debug terraform plan -input=false -no-color -out=tfplan
+          # Generating Terraform plan (binary and json format)
+          terraform plan >/dev/null -input=false -out=${{ env.tf_plan }} \
+          && terraform show -json ${{ env.tf_plan }} > ${{ env.tf_plan }}.json \
+          && terraform show -no-color ${{ env.tf_plan }}
+        continue-on-error: true
+        env:
+          GITHUB_OIDC_TOKEN: ${{ steps.auth-token.outputs.token }}
+      # Add plan to pull request format to review
+      - name: Add plan to pull request comment
+        uses: actions/github-script@v6
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN: "Terraform (${{ env.tf_version }})\n${{ steps.plan.outputs.stdout || steps.plan.outputs.stderr }}"
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            // 1. Retrieve existing bot comments for the PR
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            })
+            const botComment = comments.find(comment => {
+              return comment.user.type === 'Bot' && comment.body.includes('Terraform Format and Style')
+            })
+            // 2. Prepare format of the comment
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+            <details><summary>Validation Output</summary>
+            \`\`\`\n
+            ${{ steps.validate.outputs.stdout }}
+            \`\`\`
+            </details>
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+            
+            <details><summary>Show Plan</summary>
+            
+            \`\`\`\n
+            ${process.env.PLAN}
+            \`\`\`
+            
+            </details>
+            
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ env.tf_root }}\`, Workflow: \`${{ github.workflow }}\`*`;
+            
+            // 3. If we have a comment, update it, otherwise create a new one
+            if (botComment) {
+              github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              })
+            } else {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: output
+              })
+            }
+      # Check plan resutl
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      # Compress plan result
+      - name: Compress TF Plan artifacts
+        run: |
+          zip -r ${{ env.tf_plan }}.zip ./*
+
+      # Upload plan result zip file on github artifact (to be use in next jobs)
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.tf_plan }}
+          path: "${{ env.tf_root }}/${{ env.tf_plan }}.zip"
+          retention-days: 1
+
+  # Security job (checkov)
+  security:
+    # Need to waited result terraform plan job
+    needs: [terraform-plan]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ env.tf_root }}
+
+    # Define steps in security check job
+    steps:
+      # Dowload artifact (plan result)
+      - name: Download Artifacts
+        if: ${{ env.checkov_enabled != 'false'  }}
+        uses: actions/download-artifact@v3
+        with:
+          name: ${{ env.tf_plan }}
+          path: ${{ env.tf_root }}
+
+      # Unzip artifact (plan result)
+      - name: Decompress TF Plan artifacts
+        if: ${{ env.checkov_enabled != 'false' }}
+        run: |
+          unzip ${{ env.tf_plan }}.zip
+
+      # Launch checkov
+      - name: Checkov
+        if: ${{ env.checkov_enabled != 'false' }}
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          file: ${{ env.tf_root }}/${{ env.tf_plan }}.json
+          skip_check: ${{ env.checkov_skip_check }}
+          quiet: true
+          soft_fail: false
+          output_format: cli
+        env:
+          BC_SKIP_MAPPING: TRUE
+
+  # Compliance job (checkov)
+  compliance:
+    needs: [terraform-plan]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    # Define steps in compliance job
+    steps:
+       # Checkout code
+      - name: "[+] Checkout code"
+        if: ${{ env.opa_enabled == 'true' }}
+        uses: actions/checkout@v2
+
+      # Install opa
+      - name: "[+] Install OPA"
+        if: ${{ env.opa_enabled == 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install wget jq -y
+          wget https://github.com/open-policy-agent/opa/releases/download/"$opa_version"/opa_linux_amd64
+          sudo mv opa_linux_amd64 /usr/local/bin/opa
+          sudo chmod 755 /usr/local/bin/opa
+
+      # Dowload artifact (plan result)
+      - name: Download Artifacts
+        if: ${{ env.opa_enabled == 'true' }}
+        uses: actions/download-artifact@v3
+        with:
+          name: ${{ env.tf_plan }}
+          path: ${{ env.tf_root }}
+
+      # Unzip artifact (plan result)
+      - name: Decompress TF Plan artifacts
+        if: ${{ env.opa_enabled == 'true' }}
+        run: |
+          unzip "$tf_root/$tf_plan.zip" -d "$opa_rego_path/$tf_root"
+
+      # Check tf.state compliance with rego rule
+      - name: "[+] Check tf.state Compliance"
+        if: ${{ env.opa_enabled == 'true' }}
+        run: |
+          opa eval -i "$opa_rego_path/$tf_root/$tf_plan_json" -d "$opa_rego_path/$opa_rego_file" "data.main.deny" -f pretty > "$opa_result_path/$opa_result_file"
+          ls "$opa_result_path/$opa_result_file"
+          cat "$opa_result_path/$opa_result_file"
+
+      # Show compliance result 
+      - name: "[+] Show result.json"
+        if: ${{ env.opa_enabled == 'true' }}
+        run: cat "$opa_result_path/$opa_result_file"
+
+      # Check exit code 
+      - name: "[+] Exit 1 if error "
+        if: ${{ env.opa_enabled == 'true' }}
+        run: |
+          #[+] Exit 1 if error
+          if [[ -z $(jq -r '.[] | @base64' "$opa_result_path/$opa_result_file") ]]; then
+              exit 0
+          else
+              exit 1
+          fi
+
+  # Terraform apply
+  terraform-apply:
+    needs: [terraform-plan, security, compliance]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    # Define steps in Terraform apply
+    steps:
+      # Dowload artifact (plan result)
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: ${{ env.tf_plan }}
+
+      # Unzip artifact (plan result)
+      - name: Decompress TF Plan artifacts
+        run: |
+          unzip "$tf_plan.zip"
+
+      # setup nodejs (needed by terraform)
+      - name: Setup Node.JS for Terraform wrapper
+        uses: actions/setup-node@v3
+        with:
+          node-version: 'lts/*'
+
+      # setup terraform
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.tf_version }}
+          terraform_wrapper: false
+
+      # Launch terraform init
+      - name: Terraform Init
+        id: init
+        run: terraform init -input=false -no-color
+
+      # Launch terraform apply
+      - name: Terraform Apply
+        run: |
+          terraform apply -auto-approve -input=false "$tf_plan"
