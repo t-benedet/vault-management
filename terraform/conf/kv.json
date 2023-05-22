@@ -1,0 +1,10 @@
+{
+	"kv_vaults": [
+	  {
+		"name": "kv_test_2/",
+		"type" : "kv-v2"
+		
+	  	}  
+	]
+
+}
