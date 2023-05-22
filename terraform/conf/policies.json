@@ -1,0 +1,8 @@
+{
+  "policies": [
+    {
+      "name": "kv_test_2",
+      "policy": "path \"kv_test_2/*\" { capabilities = [\"list\", \"create\", \"update\", \"read\", \"delete\"] }"
+    }
+    ] 
+}
