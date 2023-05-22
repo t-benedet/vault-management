@@ -1,0 +1,9 @@
+{
+"group": [
+    {
+        "name": "kv_test_group2",
+        "type" : "internal" ,
+        "policy": "kv_test_2"
+    }
+        ] 
+}
